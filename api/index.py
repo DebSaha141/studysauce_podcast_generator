@@ -8,11 +8,9 @@ import io
 import tempfile
 from datetime import datetime
 import fitz 
-from pydub import AudioSegment
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
 from elevenlabs.client import ElevenLabs
-from elevenlabs import play, stream, save
 from google.api_core.exceptions import BadRequest
 import threading
 from werkzeug.utils import secure_filename
@@ -263,7 +261,7 @@ def get_voice_settings_for_line(line: str, voice_settings: dict) -> dict:
 def strip_speaker_label(line: str) -> str:
     return re.sub(r"^[A-Za-z]+:\s*", "", line)
 
-def text_to_audio_elevenlabs(text: str, voice_id: str) -> AudioSegment:
+def text_to_audio_elevenlabs(text: str, voice_id: str) -> bytes:
     if not ELEVENLABS_API_KEY:
         raise RuntimeError("ELEVENLABS_API_KEY not configured")
         
@@ -275,7 +273,7 @@ def text_to_audio_elevenlabs(text: str, voice_id: str) -> AudioSegment:
         )
         
         audio_data = b"".join(audio_generator)
-        return AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
+        return audio_data
         
     except Exception as e:
         try:
@@ -292,7 +290,7 @@ def text_to_audio_elevenlabs(text: str, voice_id: str) -> AudioSegment:
                 }
             )
             data = b"".join(stream)
-            return AudioSegment.from_file(io.BytesIO(data), format="mp3")
+            return data
         except Exception as e2:
             print(f"Audio generation failed: {e2}")
             raise e2
@@ -314,7 +312,7 @@ def process_podcast_creation(pdf_path: str, task_id: str):
         processing_status[task_id]['status'] = 'Converting to audio...'
         processing_status[task_id]['progress'] = 60
         
-        final_audio = AudioSegment.silent(duration=1000)
+        audio_segments = []
         speakers_lower = set(name.lower() for name in speakers)
         
         script_lines = [clean_line(line) for line in script.split("\n") if clean_line(line)]
@@ -334,8 +332,8 @@ def process_podcast_creation(pdf_path: str, task_id: str):
                     continue
                 
                 try:
-                    audio_seg = text_to_audio_elevenlabs(text=content, voice_id=voice_id)
-                    final_audio += audio_seg + AudioSegment.silent(duration=500)
+                    audio_data = text_to_audio_elevenlabs(text=content, voice_id=voice_id)
+                    audio_segments.append(audio_data)
                     processed_lines += 1
                     
                     progress = 60 + (processed_lines / total_lines) * 35
@@ -349,11 +347,15 @@ def process_podcast_creation(pdf_path: str, task_id: str):
         processing_status[task_id]['status'] = 'Finalizing podcast...'
         processing_status[task_id]['progress'] = 95
         
+        # Simple concatenation of audio segments
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"StudySauce_Podcast_{timestamp}.mp3"
         output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
         
-        final_audio.export(output_path, format="mp3")
+        # Write concatenated audio to file
+        with open(output_path, 'wb') as output_file:
+            for segment in audio_segments:
+                output_file.write(segment)
         
         processing_status[task_id]['status'] = 'Complete!'
         processing_status[task_id]['progress'] = 100
@@ -709,10 +711,8 @@ def download_file(identifier):
         print(f"Download error: {e}")
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
 
-# Vercel handler
-def handler(event, context):
-    return app(event, context)
-
+# Export the Flask app for Vercel
+# This is the key part - Vercel looks for 'app' variable
 if __name__ == '__main__':
     print("🎧 StudySauce Backend Starting...")
     print("📋 Make sure to set your API keys as environment variables:")
